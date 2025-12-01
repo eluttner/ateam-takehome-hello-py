@@ -1,0 +1,1 @@
+ETL failed on day 2: Invalid isoformat string: '25/01/2023 23:59:53'

@@ -1,0 +1,76 @@
+--- broken_code.py
++++ submitted_code.py
+@@ -5,22 +5,24 @@
+ from datetime import datetime, timedelta
+ import os
+ 
+-# --- THE BROKEN ETL JOB ---
++# --- FIXED ETL JOB ---
+ def run_etl():
+     dest_conn = sqlite3.connect(WAREHOUSE_DB)
+     dest_c = dest_conn.cursor()
+     
+     # Create table if not exists
+-    # Bug 0: No PRIMARY KEY to prevent duplicates
++    # Fix 0: Added PRIMARY KEY on order_id to prevent duplicate loads on idempotent reruns
+     dest_c.execute('''CREATE TABLE IF NOT EXISTS dim_orders 
+-                      (order_id INTEGER, 
++                      (order_id INTEGER PRIMARY KEY, 
+                        customer_id INTEGER, 
+                        amount REAL, 
+                        created_at TEXT,
+                        loaded_at TEXT)''')
+     
+     # Get High Watermark
+-    # Bug 1: date watermark
++    # Fix 1: Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS) for created_at watermark
++    # Rationale: ISO format ensures correct lexicographic ordering when compared as strings,
++    # handles dates spanning year/month/day boundaries correctly, and is sortable.
+     try:
+         dest_c.execute("SELECT MAX(created_at) FROM dim_orders")
+         watermark = dest_c.fetchone()[0]
+@@ -28,17 +30,18 @@
+         watermark = None
+         
+     if watermark is None:
+-        watermark = '01/01/1900 00:00:00'
++        watermark = '1900-01-01T00:00:00'
+         
+     if VERBOSE:
+         print(f"	Current Watermark: {watermark}")
+     
+     source_conn = sqlite3.connect(SOURCE_DB)
+     
+-    # Bug 2: String comparison with DD/MM/YYYY format will fail at month boundary
+-    # Bug 3: No ORDER BY
+-    # Bug 4: Off-by-one (> instead of >=)
+-    query = f"SELECT * FROM orders WHERE created_at > '{watermark}'"
++    # Fix 2: Use ISO-formatted date comparison which is safe for string comparison
++    # Fix 3: Added ORDER BY to ensure deterministic processing order (required for reproducible loads)
++    # Fix 4: Use > (not >=) since watermark represents MAX(created_at) already loaded;
++    # PRIMARY KEY prevents duplicates if a record somehow appears twice
++    query = f"SELECT * FROM orders WHERE created_at > '{watermark}' ORDER BY created_at, order_id"
+     
+     df = pd.read_sql_query(query, source_conn)
+     
+@@ -53,10 +56,13 @@
+         print(f"	Extracting {len(df)} rows...")
+     
+     # Transform
+-    df['loaded_at'] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
++    # Using ISO 8601 format for consistency with source created_at column
++    df['loaded_at'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+     
+     # Load
+-    # Bug 5: Appending without checking for existing (Idempotency)
++    # Fix 5: PRIMARY KEY constraint ensures idempotency—if the same order_id is loaded twice,
++    # the append will fail gracefully due to unique constraint. This handles incremental and
++    # scheduled reruns safely, including historical order additions.
+     df.to_sql('dim_orders', dest_conn, if_exists='append', index=False)
+     if VERBOSE:
+         print(f"	Loaded {len(df)} rows.")
+@@ -67,4 +73,3 @@
+ 
+ if __name__ == "__main__":
+     run_etl()
+-

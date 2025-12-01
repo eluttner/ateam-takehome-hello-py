@@ -1,0 +1,96 @@
+--- broken_code.py
++++ submitted_code.py
+@@ -5,40 +5,45 @@
+ from datetime import datetime, timedelta
+ import os
+ 
+-# --- THE BROKEN ETL JOB ---
++# --- THE FIXED ETL JOB ---
+ def run_etl():
+     dest_conn = sqlite3.connect(WAREHOUSE_DB)
+     dest_c = dest_conn.cursor()
+     
+-    # Create table if not exists
+-    # Bug 0: No PRIMARY KEY to prevent duplicates
++    # Fixed Bug 0: Add PRIMARY KEY to prevent duplicate rows on re-runs
+     dest_c.execute('''CREATE TABLE IF NOT EXISTS dim_orders 
+-                      (order_id INTEGER, 
++                      (order_id INTEGER PRIMARY KEY, 
+                        customer_id INTEGER, 
+                        amount REAL, 
+                        created_at TEXT,
+                        loaded_at TEXT)''')
+     
+-    # Get High Watermark
+-    # Bug 1: date watermark
++    # Fixed Bug 1 & 2: Use a metadata table to track watermark in ISO 8601 format
++    # Rationale: ISO 8601 (YYYY-MM-DDTHH:MM:SS) sorts lexicographically correctly
++    # and is the industry standard for timestamps. Avoids DD/MM/YYYY locale issues.
++    dest_c.execute('''CREATE TABLE IF NOT EXISTS etl_metadata
++                      (table_name TEXT PRIMARY KEY,
++                       max_created_at TEXT)''')
++    
++    # Get High Watermark from metadata table
+     try:
+-        dest_c.execute("SELECT MAX(created_at) FROM dim_orders")
+-        watermark = dest_c.fetchone()[0]
++        dest_c.execute("SELECT max_created_at FROM etl_metadata WHERE table_name = 'dim_orders'")
++        result = dest_c.fetchone()
++        watermark = result[0] if result else None
+     except:
+         watermark = None
+         
+     if watermark is None:
+-        watermark = '01/01/1900 00:00:00'
++        watermark = '1900-01-01T00:00:00'  # ISO 8601 epoch
+         
+     if VERBOSE:
+         print(f"	Current Watermark: {watermark}")
+     
+     source_conn = sqlite3.connect(SOURCE_DB)
+     
+-    # Bug 2: String comparison with DD/MM/YYYY format will fail at month boundary
+-    # Bug 3: No ORDER BY
+-    # Bug 4: Off-by-one (> instead of >=)
+-    query = f"SELECT * FROM orders WHERE created_at > '{watermark}'"
++    # Fixed Bugs 3 & 4: Use >= for boundary inclusion (idempotency) and add ORDER BY
++    # Ordering ensures consistent, deterministic processing of records at the same timestamp
++    query = f"SELECT * FROM orders WHERE created_at >= '{watermark}' ORDER BY created_at, order_id"
+     
+     df = pd.read_sql_query(query, source_conn)
+     
+@@ -53,13 +58,24 @@
+         print(f"	Extracting {len(df)} rows...")
+     
+     # Transform
+-    df['loaded_at'] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
++    df['loaded_at'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+     
+-    # Load
+-    # Bug 5: Appending without checking for existing (Idempotency)
+-    df.to_sql('dim_orders', dest_conn, if_exists='append', index=False)
++    # Fixed Bug 5: Use INSERT OR REPLACE to handle idempotency
++    # This ensures re-runs don't create duplicates and handles updates correctly
++    for _, row in df.iterrows():
++        dest_c.execute('''INSERT OR REPLACE INTO dim_orders 
++                         (order_id, customer_id, amount, created_at, loaded_at) 
++                         VALUES (?, ?, ?, ?, ?)''',
++                      (row['order_id'], row['customer_id'], row['amount'], 
++                       row['created_at'], row['loaded_at']))
++    
++    # Update watermark to the maximum created_at we just processed
++    new_watermark = df['created_at'].max()
++    dest_c.execute('''INSERT OR REPLACE INTO etl_metadata (table_name, max_created_at)
++                      VALUES (?, ?)''', ('dim_orders', new_watermark))
++    
+     if VERBOSE:
+-        print(f"	Loaded {len(df)} rows.")
++        print(f"	Loaded {len(df)} rows. New watermark: {new_watermark}")
+     
+     dest_conn.commit()
+     dest_conn.close()
+@@ -67,4 +83,3 @@
+ 
+ if __name__ == "__main__":
+     run_etl()
+-
