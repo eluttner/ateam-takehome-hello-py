@@ -96,8 +96,8 @@ Bug 5: Appending without checking for existing (Idempotency)
         - test for duplicate records
 
 # Observation
-- the repo has a sandbox commited for demonstration
-- costed $2.22 to run 20 times
+- the repo has a sandbox commited for demonstration (10 runs)
+- A 20 run demonstration costed $2.22
 ```
 ============================================================
 Test Results:
